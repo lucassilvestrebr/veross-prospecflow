@@ -1,0 +1,20 @@
+"use client";
+import { useEffect,useState } from "react";
+const LOGO="https://res.cloudinary.com/dofv1fbu6/image/upload/v1789318165/VEROSS-PROSPECFLOW-DARKMODE_vflx76.png";
+type Answer=""|"yes"|"no";
+const questions=[
+  ["acceptedAsClient","Você aceita este lead como um potencial cliente?"],
+  ["priorityNow","É prioridade no momento contratar a solução?"],
+  ["hasPain","Possui dores que a sua solução resolve?"],
+  ["hasBudget","Possui orçamento para contratar a solução?"],
+  ["spokeToDecisionMaker","Você falou com o responsável pela compra?"],
+] as const;
+export default function PublicFeedbackForm({token}:{token:string}){
+  const [info,setInfo]=useState<{leadName:string;company:string;status:string}|null>(null);const [meeting,setMeeting]=useState<Answer>("");const [meetingDate,setMeetingDate]=useState(new Date().toISOString().slice(0,10));const [answers,setAnswers]=useState<Record<string,Answer>>({});const [observation,setObservation]=useState("");const [message,setMessage]=useState("");const [sending,setSending]=useState(false);
+  useEffect(()=>{fetch(`/api/feedback/${token}`,{cache:"no-store"}).then(async r=>{const d=await r.json();if(!r.ok)throw new Error(d.error);setInfo(d)}).catch(e=>setMessage(e.message))},[token]);
+  async function submit(){setSending(true);setMessage("");const response=await fetch(`/api/feedback/${token}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({hadMeeting:meeting==="yes",meetingDate,...Object.fromEntries(questions.map(([key])=>[key,answers[key]==="yes"])),observation})});const result=await response.json();setSending(false);if(!response.ok){setMessage(result.error);return}setInfo(x=>x?{...x,status:"responded"}:x)}
+  const complete=meeting==="no"||(meeting==="yes"&&meetingDate&&questions.every(([key])=>answers[key]));
+  if(!info)return <main className="public-feedback"><img src={LOGO} alt="Veross ProspecFlow"/><section className="feedback-public-card"><p>{message||"Carregando feedback…"}</p></section></main>;
+  if(info.status==="responded")return <main className="public-feedback"><img src={LOGO} alt="Veross ProspecFlow"/><section className="feedback-public-card feedback-thanks"><span>✓</span><h1>Feedback recebido</h1><p>Obrigado. Sua resposta já foi registrada para o time responsável.</p></section></main>;
+  return <main className="public-feedback"><img src={LOGO} alt="Veross ProspecFlow"/><section className="feedback-public-card"><span className="eyebrow">Feedback de ganho</span><h1>{info.company}</h1><p className="muted">Conte como foi a reunião com {info.leadName}. Sua resposta ajuda a melhorar a qualidade das prospecções.</p><div className="meeting-options"><button className={meeting==="no"?"selected no":""} onClick={()=>setMeeting("no")}><i>×</i><span><b>Não tive uma reunião</b><small>O contato não compareceu à reunião</small></span></button><button className={meeting==="yes"?"selected yes":""} onClick={()=>setMeeting("yes")}><i>✓</i><span><b>Tive uma reunião</b><small>A reunião foi realizada com o lead</small></span></button></div>{meeting==="yes"&&<div className="qualification-questions"><label className="meeting-date">Data da reunião<input type="date" value={meetingDate} onChange={e=>setMeetingDate(e.target.value)} required/></label>{questions.map(([key,label])=><fieldset key={key}><legend>{label}</legend><label><input type="radio" name={key} checked={answers[key]==="yes"} onChange={()=>setAnswers(x=>({...x,[key]:"yes"}))}/> Sim</label><label><input type="radio" name={key} checked={answers[key]==="no"} onChange={()=>setAnswers(x=>({...x,[key]:"no"}))}/> Não</label></fieldset>)}</div>}<label className="feedback-observation">Observação para o Responsável <small>(opcional)</small><textarea value={observation} onChange={e=>setObservation(e.target.value)} placeholder="Registre contexto, próximos passos ou pontos de atenção."/></label>{message&&<p className="form-message">{message}</p>}<button className="primary feedback-submit" disabled={!complete||sending} onClick={submit}>{sending?"Enviando…":"Enviar feedback"}</button></section></main>;
+}

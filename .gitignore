@@ -1,0 +1,10 @@
+.next/
+node_modules/
+.env*
+!.env.example
+.npm-cache/
+*.log
+.neon
+.neon-cli/
+.vercel/
+.vercel-global/
