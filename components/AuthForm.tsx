@@ -26,32 +26,37 @@ export default function AuthForm({ backendConfigured }: { backendConfigured: boo
     setLoading(true);
     setMessage("");
 
-    const result = signup
-      ? await authClient.signUp.email({ email, password, name })
-      : await authClient.signIn.email({ email, password });
+    try {
+      const result = signup
+        ? await authClient.signUp.email({ email, password, name })
+        : await authClient.signIn.email({ email, password });
 
-    if (result.error) {
+      if (result.error) {
+        setMessage(result.error.message || "Não foi possível autenticar.");
+        return;
+      }
+
+      if (signup) {
+        await fetch("/api/workspace", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            action: "onboard",
+            firstName: form.get("first_name"),
+            lastName: form.get("last_name"),
+            phone: form.get("phone"),
+            company: form.get("company"),
+          }),
+        });
+      }
+
+      router.replace("/");
+      router.refresh();
+    } catch {
+      setMessage("Não foi possível concluir o acesso. Atualize a página e tente novamente.");
+    } finally {
       setLoading(false);
-      setMessage(result.error.message || "Não foi possível autenticar.");
-      return;
     }
-
-    if (signup) {
-      await fetch("/api/workspace", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          action: "onboard",
-          firstName: form.get("first_name"),
-          lastName: form.get("last_name"),
-          phone: form.get("phone"),
-          company: form.get("company"),
-        }),
-      });
-    }
-
-    router.replace("/");
-    router.refresh();
   }
 
   return (
