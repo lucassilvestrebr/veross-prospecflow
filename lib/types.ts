@@ -46,6 +46,15 @@ export interface Cadence {
   name: string;
   active: boolean;
   description?: string | null;
+  focus?: "inbound_active" | "inbound_passive" | "outbound" | "other";
+  priority?: "low" | "normal" | "high";
+  automatic_loss_days?: number;
+  automatic_loss_reason_id?: string | null;
+  total_leads?: number;
+  awaiting_start?: number;
+  in_execution?: number;
+  finished?: number;
+  gains?: number;
   steps: CadenceStep[];
 }
 
