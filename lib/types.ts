@@ -22,6 +22,7 @@ export interface Lead {
   cadence_status?: "active" | "paused" | "completed" | "stopped" | null;
   loss_reason_id?: string | null;
   custom_data?: Record<string, string>;
+  observations?: string | null;
 }
 
 export interface Activity {
