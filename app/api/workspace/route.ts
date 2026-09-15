@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth, isNeonConfigured } from "@/lib/auth-server";
 import { getDb } from "@/lib/db";
+import { sendInviteEmail } from "@/lib/invite-email";
 
 export const dynamic = "force-dynamic";
 type SessionUser = { id: string; name?: string | null; email?: string | null };
 type StepInput = { template_id?: string | null; step_order: number; day_offset: number; type: string; title: string; instructions?: string; suggested_time?: string };
 type UserProfile = { user_id:string; organization_id:string; role:string; status:string };
+type PendingInvite = { id:string; organization_id:string; first_name:string; last_name:string; role:string };
 type ScoreRule = { field:string; operator:"equals"|"contains"|"filled"; value:string; points:number };
 
 async function currentUser(): Promise<SessionUser | null> {
@@ -56,15 +58,24 @@ async function ensureProfile(user: SessionUser) {
   const displayName = user.name?.trim() || user.email?.split("@")[0] || "Usuário";
   const invited = user.email ? await sql`select id,organization_id,first_name,last_name,role from user_invites where lower(email)=lower(${user.email}) and status='pending' order by created_at desc limit 1` : [];
   if(invited[0]){
-    await sql`insert into profiles (user_id,organization_id,first_name,last_name,email,role,status) values (${user.id},${invited[0].organization_id},${String(invited[0].first_name||displayName)},${String(invited[0].last_name||"")},${user.email||""},${String(invited[0].role)},'active')`;
-    await sql`update user_invites set status='accepted',accepted_at=now() where id=${invited[0].id}`;
-    return {user_id:user.id,organization_id:String(invited[0].organization_id),role:String(invited[0].role),status:'active'};
+    return acceptInvite(user,invited[0] as PendingInvite);
   }
   const org = await sql`insert into organizations (name) values (${`Empresa de ${displayName}`}) returning id`;
   await sql`insert into profiles (user_id, organization_id, first_name, last_name, email, role) values (${user.id}, ${org[0].id}, ${displayName}, '', ${user.email || ""}, 'owner')`;
   await seedOrganization(String(org[0].id));
   return { user_id: user.id, organization_id: String(org[0].id), role:'owner', status:'active' };
 }
+
+async function acceptInvite(user:SessionUser,invite:PendingInvite,phone="") {
+  const sql=getDb();const existing=await sql`select organization_id from profiles where user_id=${user.id} limit 1`;const previousOrganization=existing[0]?.organization_id?String(existing[0].organization_id):"";const displayName=user.name?.trim()||user.email?.split("@")[0]||"Usuário";
+  if(existing[0])await sql`update profiles set organization_id=${invite.organization_id},first_name=${invite.first_name||displayName},last_name=${invite.last_name||""},phone=coalesce(nullif(${phone},''),phone),email=${user.email||""},role=${invite.role},status='active',deleted_at=null,updated_at=now() where user_id=${user.id}`;
+  else await sql`insert into profiles (user_id,organization_id,first_name,last_name,phone,email,role,status) values (${user.id},${invite.organization_id},${invite.first_name||displayName},${invite.last_name||""},${phone||null},${user.email||""},${invite.role},'active')`;
+  await sql`update user_invites set status='accepted',accepted_at=now() where id=${invite.id} and status='pending'`;
+  if(previousOrganization&&previousOrganization!==invite.organization_id){await sql`delete from organizations o where o.id=${previousOrganization} and o.plan_status='trial' and not exists(select 1 from profiles p where p.organization_id=o.id) and not exists(select 1 from leads l where l.organization_id=o.id)`;}
+  return {user_id:user.id,organization_id:String(invite.organization_id),role:String(invite.role),status:'active'};
+}
+
+function inviteUrl(request:NextRequest,token:unknown){const configured=process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/,"");return `${configured||new URL(request.url).origin}/auth?invite=${encodeURIComponent(String(token))}`;}
 
 async function calculateScore(organizationId:string, lead:Record<string,unknown>){
   const sql=getDb();const rows=await sql`select score_rules_v2 from organization_settings where organization_id=${organizationId} limit 1`;
@@ -168,8 +179,12 @@ export async function POST(request: NextRequest) {
     const user=await currentUser(); if(!user)return NextResponse.json({error:"Não autorizado"},{status:401});
     const body=await request.json(); const sql=getDb();
     if(body.action==="onboard"){
+      const email=String(user.email||"").trim().toLowerCase();const token=String(body.inviteToken||"");
+      const invited=token?await sql`select id,organization_id,first_name,last_name,role from user_invites where token::text=${token} and lower(email)=${email} and status='pending' limit 1`:email?await sql`select id,organization_id,first_name,last_name,role from user_invites where lower(email)=${email} and status='pending' order by created_at desc limit 1`:[];
+      if(token&&!invited[0])throw new Error("Este convite não pertence ao e-mail informado ou já foi utilizado.");
+      if(invited[0]){await acceptInvite(user,invited[0] as PendingInvite,String(body.phone||""));await seedOrganization(String(invited[0].organization_id));return NextResponse.json({ok:true,invited:true});}
       const existing=await sql`select organization_id from profiles where user_id=${user.id} limit 1`;
-      if(existing[0]){await sql`update profiles set first_name=${String(body.firstName||"")},last_name=${String(body.lastName||"")},phone=${String(body.phone||"")},updated_at=now() where user_id=${user.id}`;if(body.company)await sql`update organizations set name=${String(body.company)} where id=${existing[0].organization_id}`;await seedOrganization(String(existing[0].organization_id));return NextResponse.json({ok:true});}
+      if(existing[0]){await sql`update profiles set first_name=${String(body.firstName||"")},last_name=${String(body.lastName||"")},phone=${String(body.phone||"")},updated_at=now() where user_id=${user.id}`;const owner=await sql`select 1 from profiles where user_id=${user.id} and role='owner' limit 1`;if(owner[0]&&body.company)await sql`update organizations set name=${String(body.company)} where id=${existing[0].organization_id}`;await seedOrganization(String(existing[0].organization_id));return NextResponse.json({ok:true});}
       const org=await sql`insert into organizations (name) values (${String(body.company||"Minha empresa")}) returning id`;
       await sql`insert into profiles (user_id,organization_id,first_name,last_name,phone,email,role) values (${user.id},${org[0].id},${String(body.firstName||"")},${String(body.lastName||"")},${String(body.phone||"")},${user.email||""},'owner')`;
       await seedOrganization(String(org[0].id)); return NextResponse.json({ok:true});
@@ -266,8 +281,12 @@ export async function POST(request: NextRequest) {
       await requireAdmin(profile);const email=String(body.user?.email||"").trim().toLowerCase();if(!email)throw new Error("Informe o e-mail do usuário.");
       const capacity=await sql`select o.plan_status,o.licensed_seats,(select count(*)::int from profiles p where p.organization_id=o.id and p.status='active') active_users,(select count(*)::int from user_invites i where i.organization_id=o.id and i.status='pending') pending_invites from organizations o where o.id=${organizationId} limit 1`;if(capacity[0]?.plan_status==='active'&&Number(capacity[0].active_users)+Number(capacity[0].pending_invites)>=Number(capacity[0].licensed_seats))throw new Error("O plano atual não possui acessos disponíveis.");
       const existing=await sql`select user_id from profiles where organization_id=${organizationId} and lower(email)=lower(${email}) and status<>'deleted' limit 1`;if(existing[0])throw new Error("Este usuário já pertence ao time.");
-      const rows=await sql`insert into user_invites (organization_id,email,first_name,last_name,role,invited_by,status) values (${organizationId},${email},${String(body.user?.first_name||"")},${String(body.user?.last_name||"")},${String(body.user?.role||"member")},${user.id},'pending') on conflict(organization_id,email) do update set first_name=excluded.first_name,last_name=excluded.last_name,role=excluded.role,status='pending',token=gen_random_uuid(),invited_by=excluded.invited_by,created_at=now() returning id,token`;
-      return NextResponse.json({ok:true,id:rows[0].id,token:rows[0].token});
+      const role=['admin','manager','member'].includes(String(body.user?.role))?String(body.user.role):'member';const rows=await sql`insert into user_invites (organization_id,email,first_name,last_name,role,invited_by,status) values (${organizationId},${email},${String(body.user?.first_name||"")},${String(body.user?.last_name||"")},${role},${user.id},'pending') on conflict(organization_id,email) do update set first_name=excluded.first_name,last_name=excluded.last_name,role=excluded.role,status='pending',token=gen_random_uuid(),invited_by=excluded.invited_by,created_at=now(),accepted_at=null returning id,token`;
+      const info=await sql`select o.name as organization_name,concat_ws(' ',p.first_name,p.last_name) as inviter_name from organizations o join profiles p on p.user_id=${user.id} where o.id=${organizationId} limit 1`;const delivery=await sendInviteEmail({to:email,firstName:String(body.user?.first_name||''),inviterName:String(info[0]?.inviter_name||'A equipe'),organizationName:String(info[0]?.organization_name||'ProspecFlow'),role,inviteUrl:inviteUrl(request,rows[0].token)});
+      return NextResponse.json({ok:true,id:rows[0].id,token:rows[0].token,emailSent:delivery.sent,emailError:delivery.error||null});
+    }
+    if(body.action==="resendInvite"){
+      await requireAdmin(profile);const rows=await sql`select i.id,i.email,i.first_name,i.role,i.token,o.name as organization_name,concat_ws(' ',p.first_name,p.last_name) as inviter_name from user_invites i join organizations o on o.id=i.organization_id join profiles p on p.user_id=${user.id} where i.id=${String(body.id)} and i.organization_id=${organizationId} and i.status='pending' limit 1`;if(!rows[0])throw new Error('Convite pendente não encontrado.');const delivery=await sendInviteEmail({to:String(rows[0].email),firstName:String(rows[0].first_name||''),inviterName:String(rows[0].inviter_name||'A equipe'),organizationName:String(rows[0].organization_name),role:String(rows[0].role),inviteUrl:inviteUrl(request,rows[0].token)});if(!delivery.sent)throw new Error(delivery.error||'Não foi possível enviar o convite.');return NextResponse.json({ok:true,emailSent:true});
     }
     if(body.action==="cancelInvite"){await requireAdmin(profile);await sql`update user_invites set status='cancelled' where id=${String(body.id)} and organization_id=${organizationId}`;return NextResponse.json({ok:true});}
     if(body.action==="updateUser"){

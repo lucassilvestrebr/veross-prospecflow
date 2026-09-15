@@ -38,6 +38,14 @@ O checkout está preparado para cobrança mensal por acesso. Configure na Vercel
 
 Cadastre o endpoint `/api/billing/webhook` na Stripe para os eventos `customer.subscription.created`, `customer.subscription.updated` e `customer.subscription.deleted`.
 
+## Convites por e-mail
+
+Os convites vinculam o novo usuário à organização e à função escolhida. Para enviá-los automaticamente, verifique o domínio remetente na Resend e configure na Vercel:
+
+- `RESEND_API_KEY`
+- `PROSPECFLOW_INVITE_FROM` — por exemplo, `ProspecFlow <convites@veross.com.br>`
+- `NEXT_PUBLIC_APP_URL` — `https://engage.veross.com.br`
+
 ## Próximas integrações recomendadas
 
 - Resend para confirmação, recuperação de senha e avisos do trial.
