@@ -191,7 +191,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({created,rejected:input.length-created,errors,importId});
     }
     if(body.action==="createActivity"){
-      const a=body.activity;const rows=await sql`insert into activities (lead_id,assigned_to,type,title,status,due_at,notes) select id,${user.id},${String(a.type)},${String(a.title)},'pending',${String(a.due_at)},${String(a.notes||"")} from leads where id=${String(a.lead_id)} and organization_id=${organizationId} returning id,lead_id,type,title,status,due_at,completed_at,notes`;
+      const a=body.activity;if(String(a.type)==="meeting")throw new Error("Reunião não é um tipo de atividade disponível.");const rows=await sql`insert into activities (lead_id,assigned_to,type,title,status,due_at,notes) select id,${user.id},${String(a.type)},${String(a.title)},'pending',${String(a.due_at)},${String(a.notes||"")} from leads where id=${String(a.lead_id)} and organization_id=${organizationId} returning id,lead_id,type,title,status,due_at,completed_at,notes`;
       if(!rows[0])return NextResponse.json({error:"Lead não encontrado"},{status:404});await sql`insert into lead_events (lead_id,actor_id,event_type,title,body) values (${String(a.lead_id)},${user.id},'activity_added','Atividade adicionada',${String(a.title)})`;return NextResponse.json({data:rows[0]});
     }
     if(["completeActivity","skipActivity","cancelActivity"].includes(body.action)){
@@ -245,6 +245,7 @@ export async function POST(request: NextRequest) {
     }
     if(body.action==="createActivityTemplate"||body.action==="updateActivityTemplate"){
       const t=body.template;if(!String(t.name||"").trim())throw new Error("Informe o nome da atividade.");
+      if(String(t.type)==="meeting")throw new Error("Reunião não é um tipo de atividade disponível.");
       if(body.action==="createActivityTemplate"){const rows=await sql`insert into activity_templates (organization_id,name,type,instructions,email_subject,email_body,active) values (${organizationId},${String(t.name)},${String(t.type)},${String(t.instructions||"")},${t.email_subject?String(t.email_subject):null},${t.email_body?String(t.email_body):null},true) returning id`;return NextResponse.json({ok:true,id:rows[0].id});}
       await sql`update activity_templates set name=${String(t.name)},type=${String(t.type)},instructions=${String(t.instructions||"")},email_subject=${t.email_subject?String(t.email_subject):null},email_body=${t.email_body?String(t.email_body):null},updated_at=now() where id=${String(t.id)} and organization_id=${organizationId}`;return NextResponse.json({ok:true});
     }
@@ -253,7 +254,7 @@ export async function POST(request: NextRequest) {
       const c=body.cadence;let cadenceId=String(c.id||"");
       if(body.action==="createCadence"){const rows=await sql`insert into cadences (organization_id,name,description,active) values (${organizationId},${String(c.name)},${String(c.description||"")},${c.active!==false}) returning id`;cadenceId=String(rows[0].id);}else{await sql`update cadences set name=${String(c.name)},description=${String(c.description||"")},active=${c.active!==false},updated_at=now() where id=${cadenceId} and organization_id=${organizationId}`;await sql`delete from cadence_steps where cadence_id=${cadenceId}`;}
       for(const [i,s] of (c.steps||[]).entries()){
-        const templates=await sql`select id,name,type,instructions from activity_templates where id=${String(s.template_id||"")} and organization_id=${organizationId} and active=true limit 1`;
+        const templates=await sql`select id,name,type,instructions from activity_templates where id=${String(s.template_id||"")} and organization_id=${organizationId} and active=true and type<>'meeting' limit 1`;
         if(!templates[0])throw new Error("Selecione uma atividade válida em todas as etapas.");const t=templates[0];
         await insertStep(cadenceId,{template_id:String(t.id),step_order:i+1,day_offset:Number(s.day_offset),type:String(t.type),title:String(t.name),instructions:String(t.instructions||""),suggested_time:String(s.suggested_time||"09:00")});
       }return NextResponse.json({ok:true,id:cadenceId});
