@@ -206,7 +206,7 @@ export async function POST(request: NextRequest) {
       await seedOrganization(String(org[0].id)); return NextResponse.json({ok:true});
     }
     const profile=await ensureProfile(user);if(profile.status!=='active')return NextResponse.json({error:'Usuário suspenso ou removido.'},{status:403});const organizationId=profile.organization_id;
-    const guarded:Record<string,string>={createLead:'create_leads',bulkCreateLeads:'import_leads',deleteLead:'delete_leads',bulkDeleteLeads:'delete_leads',changeLeadOwner:'reassign_leads',createCadence:'manage_cadences',updateCadence:'manage_cadences',toggleCadence:'manage_cadences',createActivityTemplate:'manage_cadences',updateActivityTemplate:'manage_cadences',toggleActivityTemplate:'manage_cadences',createWebhookIntegration:'manage_cadences',updateWebhookIntegration:'manage_cadences',toggleWebhookIntegration:'manage_cadences',regenerateWebhookSecret:'manage_cadences'};const needed=guarded[String(body.action)];if(needed&&!await hasPermission(profile,needed))return NextResponse.json({error:'Sua função não possui permissão para esta ação.'},{status:403});
+    const guarded:Record<string,string>={createLead:'create_leads',bulkCreateLeads:'import_leads',deleteLead:'delete_leads',bulkDeleteLeads:'delete_leads',changeLeadOwner:'reassign_leads',createCadence:'manage_cadences',updateCadence:'manage_cadences',toggleCadence:'manage_cadences',createActivityTemplate:'manage_cadences',updateActivityTemplate:'manage_cadences',toggleActivityTemplate:'manage_cadences',createWebhookIntegration:'manage_cadences',updateWebhookIntegration:'manage_cadences',toggleWebhookIntegration:'manage_cadences',regenerateWebhookSecret:'manage_cadences',deleteWebhookIntegration:'manage_cadences'};const needed=guarded[String(body.action)];if(needed&&!await hasPermission(profile,needed))return NextResponse.json({error:'Sua função não possui permissão para esta ação.'},{status:403});
     if(body.action==="createLead"){
       if(!body.cadenceId)throw new Error("Selecione uma cadência.");
       const l=body.lead,email=String(l.email||"").trim().toLowerCase();if(!/^\S+@\S+\.\S+$/.test(email))throw new Error("Informe um e-mail válido.");const duplicate=await sql`select id from leads where organization_id=${organizationId} and lower(trim(email))=${email} limit 1`;if(duplicate[0])throw new Error("Já existe um lead com este e-mail na conta.");await assertNotBlocked(organizationId,email,String(l.phone||""));const score=await calculateScore(organizationId,{...l,email}); const rows=await sql`insert into leads (organization_id,created_by,first_name,last_name,email,phone,company,job_title,score,status,source,custom_data) values (${organizationId},${user.id},${String(l.first_name)},${String(l.last_name||"")},${email},${String(l.phone||"")},${String(l.company)},${String(l.job_title||"")},${score},'new',${String(l.source||"Manual")},${JSON.stringify(l.custom_data||{})}) returning id`;
@@ -343,6 +343,10 @@ export async function POST(request: NextRequest) {
     if(body.action==="regenerateWebhookSecret"){
       const secret=webhookSecret(),rows=await sql`update webhook_integrations set secret_hash=${webhookSecretHash(secret)},updated_at=now() where id=${String(body.id)} and organization_id=${organizationId} returning webhook_key::text`;
       if(!rows[0])throw new Error("Integração não encontrada.");return NextResponse.json({ok:true,data:rows[0],secret});
+    }
+    if(body.action==="deleteWebhookIntegration"){
+      const rows=await sql`delete from webhook_integrations where id=${String(body.id)} and organization_id=${organizationId} returning id`;
+      if(!rows[0])throw new Error("Integração não encontrada.");return NextResponse.json({ok:true});
     }
     return NextResponse.json({error:"Ação inválida"},{status:400});
   } catch(error) {
