@@ -52,7 +52,7 @@ export async function POST(request: NextRequest, { params }: Params) {
   }
   if (!integration.active) return NextResponse.json({ error: "Integração inativa." }, { status: 409 });
 
-  const externalReference = clean(payload.uniqueId) || null;
+  const externalReference = clean(payload.uniqueId) || clean(payload.externalReference) || null;
   const recordEvent = async (status: "created" | "duplicate" | "rejected" | "failed", message: string, leadId: string | null = null) => {
     await sql`insert into webhook_events (integration_id,external_reference,status,message,lead_id,payload) values (${String(integration.id)},${externalReference},${status},${message},${leadId},${JSON.stringify(payload)}) on conflict (integration_id,external_reference) where external_reference is not null do nothing`;
   };
@@ -61,8 +61,8 @@ export async function POST(request: NextRequest, { params }: Params) {
       const previous = await sql`select status,lead_id from webhook_events where integration_id=${String(integration.id)} and external_reference=${externalReference} limit 1`;
       if (previous[0]) return NextResponse.json({ ok: true, status: "duplicate", leadId: previous[0].lead_id, message: "Evento já processado." });
     }
-    const email = [payload.emailId, payload.providedEmailId, payload.customEmailId, payload.linkedInAccountEmailId].map(clean).find(Boolean)?.toLowerCase() || "";
-    const company = clean(payload.companyName);
+    const email = [payload.email, payload.emailId, payload.providedEmailId, payload.customEmailId, payload.linkedInAccountEmailId].map(clean).find(Boolean)?.toLowerCase() || "";
+    const company = clean(payload.companyName) || clean(payload.company);
     if (!/^\S+@\S+\.\S+$/.test(email)) {
       await recordEvent("rejected", "E-mail válido não informado.");
       return NextResponse.json({ ok: false, status: "rejected", error: "E-mail válido é obrigatório." }, { status: 422 });
@@ -78,25 +78,26 @@ export async function POST(request: NextRequest, { params }: Params) {
     }
     const { first, last } = splitName(payload);
     const customData: Record<string, string> = {
-      LinkedIn: clean(payload.linkedinProfile),
+      LinkedIn: clean(payload.linkedinProfile) || clean(payload.linkedin),
       "LinkedIn da empresa": clean(payload.companyLinkedinPage),
-      Site: clean(payload.companyWebsiteFromCompanyProfile) || clean(payload.companyWebsiteFromPersonalProfile),
+      Site: clean(payload.companyWebsiteFromCompanyProfile) || clean(payload.companyWebsiteFromPersonalProfile) || clean(payload.site),
       Segmento: clean(payload.industry),
       Cidade: clean(payload.city),
       Estado: clean(payload.state),
-      Campanha: clean(payload.campaignName),
+      Campanha: clean(payload.campaignName) || clean((payload.origin as Record<string,unknown> || {}).campaign),
       "ID externo AlessIA": externalReference || "",
     };
     for (const [name, value] of Object.entries(payload.customColumns as Record<string, unknown> || {})) customData[name] = clean(value);
     const observations = clean(payload.leadContext) || clean(payload.annotations);
     const settings = await sql`select work_days,blocklist,score_rules_v2 from organization_settings where organization_id=${String(integration.organization_id)} limit 1`;
     const blocklist = ((settings[0]?.blocklist as string[]) || []).map(item => item.toLowerCase().trim()).filter(Boolean);
-    if (blocklist.some(item => `${email} ${clean(payload.phoneNumber)}`.toLowerCase().includes(item))) {
+    const phone = clean(payload.phoneNumber) || clean((payload.phones as { phone?:unknown }[] || [])[0]?.phone);
+    if (blocklist.some(item => `${email} ${phone}`.toLowerCase().includes(item))) {
       await recordEvent("rejected", "Lead bloqueado pela blocklist.");
       return NextResponse.json({ ok: false, status: "rejected", error: "Lead bloqueado." }, { status: 422 });
     }
     const score = 50;
-    const lead = await sql`insert into leads (organization_id,created_by,first_name,last_name,email,phone,company,job_title,score,status,source,custom_data,observations) values (${String(integration.organization_id)},${String(integration.assigned_to)},${first},${last},${email},${clean(payload.phoneNumber)||null},${company},${clean(payload.jobTitle)||null},${score},'new','AlessIA Flow',${JSON.stringify(customData)},${observations||null}) returning id`;
+    const lead = await sql`insert into leads (organization_id,created_by,first_name,last_name,email,phone,company,job_title,score,status,source,custom_data,observations) values (${String(integration.organization_id)},${String(integration.assigned_to)},${first},${last},${email},${phone||null},${company},${clean(payload.jobTitle)||clean(payload.position)||null},${score},'new','AlessIA Flow',${JSON.stringify(customData)},${observations||null}) returning id`;
     const steps = await sql`select s.id,s.step_order,s.day_offset,s.type,s.title,s.instructions,s.suggested_time::text,s.template_id,t.email_subject,t.email_body from cadence_steps s left join activity_templates t on t.id=s.template_id where s.cadence_id=${String(integration.cadence_id)} order by s.step_order`;
     if (!steps.length) throw new Error("A cadência configurada não possui atividades.");
     const workDays = (settings[0]?.work_days as number[] | undefined) || [1, 2, 3, 4, 5];
