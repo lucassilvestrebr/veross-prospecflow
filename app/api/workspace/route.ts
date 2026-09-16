@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createHash, randomBytes } from "crypto";
 import { auth, isNeonConfigured } from "@/lib/auth-server";
 import { getDb } from "@/lib/db";
 import { sendInviteEmail } from "@/lib/invite-email";
@@ -9,6 +10,8 @@ type StepInput = { template_id?: string | null; step_order: number; day_offset: 
 type UserProfile = { user_id:string; organization_id:string; role:string; status:string };
 type PendingInvite = { id:string; organization_id:string; first_name:string; last_name:string; role:string };
 type ScoreRule = { field:string; operator:"equals"|"contains"|"filled"; value:string; points:number };
+const webhookSecret = () => randomBytes(24).toString("base64url");
+const webhookSecretHash = (secret:string) => createHash("sha256").update(secret).digest("hex");
 
 async function currentUser(): Promise<SessionUser | null> {
   if (!isNeonConfigured) return null;
@@ -172,10 +175,11 @@ async function workspace(organizationId: string, userId?:string) {
       left join profiles uploader on uploader.user_id=li.uploaded_by
       where li.organization_id=${organizationId} order by li.created_at desc limit 100`,
   ]);
+  const integrations=await sql`select wi.id,wi.provider,wi.name,wi.cadence_id,wi.assigned_to,wi.webhook_key::text,wi.active,wi.created_at,wi.updated_at,c.name as cadence_name,nullif(trim(concat_ws(' ',p.first_name,p.last_name)),'') as responsible_name,(select count(*)::int from webhook_events we where we.integration_id=wi.id) as event_count,(select count(*)::int from webhook_events we where we.integration_id=wi.id and we.status='created') as created_count,(select max(received_at) from webhook_events we where we.integration_id=wi.id) as last_received_at from webhook_integrations wi join cadences c on c.id=wi.cadence_id join profiles p on p.user_id=wi.assigned_to where wi.organization_id=${organizationId} order by wi.created_at desc`;
   const current=currentProfiles[0] as Record<string,unknown>|undefined;const role=String(current?.role||'member');const permissionConfig=(settings[0]?.role_permissions as Record<string,Record<string,boolean>>|undefined)||{};const canViewAll=role==='owner'||permissionConfig[role]?.view_all_leads!==false;
   const visibleLeads=canViewAll?leads:leads.filter((lead:Record<string,unknown>)=>lead.created_by===userId);const visibleIds=new Set(visibleLeads.map((lead:Record<string,unknown>)=>lead.id));const visibleActivities=canViewAll?activities:activities.filter((activity:Record<string,unknown>)=>visibleIds.has(activity.lead_id));const visibleEvents=canViewAll?events:events.filter((event:Record<string,unknown>)=>visibleIds.has(event.lead_id));
   const visibleFeedback=canViewAll?feedbackRequests:feedbackRequests.filter((item:Record<string,unknown>)=>visibleIds.has(item.lead_id));
-  return {organization:organizations[0]||null,leads:visibleLeads,activities:visibleActivities,cadences,activityTemplates,lossReasons,settings:settings[0]||null,profiles,events:visibleEvents,invites,currentProfile:current||null,feedbackRequests:visibleFeedback,leadImports};
+  return {organization:organizations[0]||null,leads:visibleLeads,activities:visibleActivities,cadences,activityTemplates,lossReasons,settings:settings[0]||null,profiles,events:visibleEvents,invites,currentProfile:current||null,feedbackRequests:visibleFeedback,leadImports,integrations};
 }
 
 async function hasPermission(profile:UserProfile,key:string){if(profile.role==='owner')return true;const sql=getDb();const rows=await sql`select role_permissions from organization_settings where organization_id=${profile.organization_id} limit 1`;const config=(rows[0]?.role_permissions as Record<string,Record<string,boolean>>|undefined)||{};return config[profile.role]?.[key]===true;}
@@ -202,7 +206,7 @@ export async function POST(request: NextRequest) {
       await seedOrganization(String(org[0].id)); return NextResponse.json({ok:true});
     }
     const profile=await ensureProfile(user);if(profile.status!=='active')return NextResponse.json({error:'Usuário suspenso ou removido.'},{status:403});const organizationId=profile.organization_id;
-    const guarded:Record<string,string>={createLead:'create_leads',bulkCreateLeads:'import_leads',deleteLead:'delete_leads',bulkDeleteLeads:'delete_leads',changeLeadOwner:'reassign_leads',createCadence:'manage_cadences',updateCadence:'manage_cadences',toggleCadence:'manage_cadences',createActivityTemplate:'manage_cadences',updateActivityTemplate:'manage_cadences',toggleActivityTemplate:'manage_cadences'};const needed=guarded[String(body.action)];if(needed&&!await hasPermission(profile,needed))return NextResponse.json({error:'Sua função não possui permissão para esta ação.'},{status:403});
+    const guarded:Record<string,string>={createLead:'create_leads',bulkCreateLeads:'import_leads',deleteLead:'delete_leads',bulkDeleteLeads:'delete_leads',changeLeadOwner:'reassign_leads',createCadence:'manage_cadences',updateCadence:'manage_cadences',toggleCadence:'manage_cadences',createActivityTemplate:'manage_cadences',updateActivityTemplate:'manage_cadences',toggleActivityTemplate:'manage_cadences',createWebhookIntegration:'manage_cadences',updateWebhookIntegration:'manage_cadences',toggleWebhookIntegration:'manage_cadences',regenerateWebhookSecret:'manage_cadences'};const needed=guarded[String(body.action)];if(needed&&!await hasPermission(profile,needed))return NextResponse.json({error:'Sua função não possui permissão para esta ação.'},{status:403});
     if(body.action==="createLead"){
       if(!body.cadenceId)throw new Error("Selecione uma cadência.");
       const l=body.lead,email=String(l.email||"").trim().toLowerCase();if(!/^\S+@\S+\.\S+$/.test(email))throw new Error("Informe um e-mail válido.");const duplicate=await sql`select id from leads where organization_id=${organizationId} and lower(trim(email))=${email} limit 1`;if(duplicate[0])throw new Error("Já existe um lead com este e-mail na conta.");await assertNotBlocked(organizationId,email,String(l.phone||""));const score=await calculateScore(organizationId,{...l,email}); const rows=await sql`insert into leads (organization_id,created_by,first_name,last_name,email,phone,company,job_title,score,status,source,custom_data) values (${organizationId},${user.id},${String(l.first_name)},${String(l.last_name||"")},${email},${String(l.phone||"")},${String(l.company)},${String(l.job_title||"")},${score},'new',${String(l.source||"Manual")},${JSON.stringify(l.custom_data||{})}) returning id`;
@@ -319,6 +323,26 @@ export async function POST(request: NextRequest) {
     if(body.action==="saveSettings"){
       await requireAdmin(profile);const s=body.settings;await sql`insert into organization_settings (organization_id,weekly_goal,daily_activity_goal,conversion_goal_pct,meeting_goal,monthly_gain_goal,work_days,work_start,work_end,custom_fields,score_rules,score_rules_v2,feedback_prompt,blocklist,default_role,email_sender_name,email_reply_to,role_permissions) values (${organizationId},${Number(s.weekly_goal||0)},${Number(s.daily_activity_goal||0)},${Number(s.conversion_goal_pct||0)},${Number(s.meeting_goal||0)},${Number(s.monthly_gain_goal||0)},${s.work_days||[1,2,3,4,5]},${String(s.work_start||"08:00")},${String(s.work_end||"18:00")},${JSON.stringify(s.custom_fields||[])},${String(s.score_rules||"")},${JSON.stringify(s.score_rules_v2||[])},${String(s.feedback_prompt||"")},${JSON.stringify(s.blocklist||[])},${String(s.default_role||"member")},${String(s.email_sender_name||"")},${String(s.email_reply_to||"")},${JSON.stringify(s.role_permissions||{})}) on conflict(organization_id) do update set weekly_goal=excluded.weekly_goal,daily_activity_goal=excluded.daily_activity_goal,conversion_goal_pct=excluded.conversion_goal_pct,meeting_goal=excluded.meeting_goal,monthly_gain_goal=excluded.monthly_gain_goal,work_days=excluded.work_days,work_start=excluded.work_start,work_end=excluded.work_end,custom_fields=excluded.custom_fields,score_rules=excluded.score_rules,score_rules_v2=excluded.score_rules_v2,feedback_prompt=excluded.feedback_prompt,blocklist=excluded.blocklist,default_role=excluded.default_role,email_sender_name=excluded.email_sender_name,email_reply_to=excluded.email_reply_to,role_permissions=excluded.role_permissions,updated_at=now()`;
       const currentLeads=await sql`select id,first_name,last_name,email,phone,company,job_title,source,custom_data from leads where organization_id=${organizationId}`;for(const lead of currentLeads){const score=await calculateScore(organizationId,lead);await sql`update leads set score=${score},updated_at=now() where id=${lead.id}`;}return NextResponse.json({ok:true});
+    }
+    if(body.action==="createWebhookIntegration"||body.action==="updateWebhookIntegration"){
+      const integration=body.integration||{},cadenceId=String(integration.cadence_id||""),assignedTo=String(integration.assigned_to||"");
+      if(!String(integration.name||"").trim()||!cadenceId||!assignedTo)throw new Error("Informe nome, cadência e responsável.");
+      const validCadence=await sql`select id from cadences where id=${cadenceId} and organization_id=${organizationId} and active=true limit 1`;
+      const validOwner=await sql`select user_id from profiles where user_id=${assignedTo} and organization_id=${organizationId} and status='active' limit 1`;
+      if(!validCadence[0]||!validOwner[0])throw new Error("Cadência ou responsável inválido.");
+      if(body.action==="createWebhookIntegration"){
+        const secret=webhookSecret(),rows=await sql`insert into webhook_integrations (organization_id,name,cadence_id,assigned_to,secret_hash,active,created_by) values (${organizationId},${String(integration.name).trim()},${cadenceId},${assignedTo},${webhookSecretHash(secret)},true,${user.id}) returning id,webhook_key::text`;
+        return NextResponse.json({ok:true,data:rows[0],secret});
+      }
+      const id=String(integration.id||"");await sql`update webhook_integrations set name=${String(integration.name).trim()},cadence_id=${cadenceId},assigned_to=${assignedTo},active=${integration.active!==false},updated_at=now() where id=${id} and organization_id=${organizationId}`;
+      return NextResponse.json({ok:true});
+    }
+    if(body.action==="toggleWebhookIntegration"){
+      await sql`update webhook_integrations set active=${Boolean(body.active)},updated_at=now() where id=${String(body.id)} and organization_id=${organizationId}`;return NextResponse.json({ok:true});
+    }
+    if(body.action==="regenerateWebhookSecret"){
+      const secret=webhookSecret(),rows=await sql`update webhook_integrations set secret_hash=${webhookSecretHash(secret)},updated_at=now() where id=${String(body.id)} and organization_id=${organizationId} returning webhook_key::text`;
+      if(!rows[0])throw new Error("Integração não encontrada.");return NextResponse.json({ok:true,data:rows[0],secret});
     }
     return NextResponse.json({error:"Ação inválida"},{status:400});
   } catch(error) {

@@ -110,6 +110,7 @@ export interface UserInvite { id:string; email:string; first_name:string; last_n
 export interface FeedbackRequest { id:string; lead_id:string; token:string; status:"pending"|"responded"; created_at:string; responded_at:string|null; lead_name:string; company:string; cadence_name:string|null; owner_name:string|null; had_meeting:boolean|null; meeting_date:string|null; accepted_as_client:boolean|null; priority_now:boolean|null; has_pain:boolean|null; has_budget:boolean|null; spoke_to_decision_maker:boolean|null; observation:string|null }
 export interface LeadImportRow { id:string; row_number:number; email:string|null; status:"accepted"|"rejected"; reason:string|null; lead_id:string|null }
 export interface LeadImport { id:string; file_name:string|null; total_rows:number; accepted_rows:number; rejected_rows:number; created_at:string; responsible_name:string|null; uploader_name:string|null; cadence_name:string|null; rows:LeadImportRow[] }
+export interface WebhookIntegration { id:string; provider:"alessia_flow"; name:string; cadence_id:string; cadence_name:string; assigned_to:string; responsible_name:string; webhook_key:string; active:boolean; created_at:string; updated_at:string; event_count:number; created_count:number; last_received_at:string|null }
 
 export interface Organization {
   id: string;
