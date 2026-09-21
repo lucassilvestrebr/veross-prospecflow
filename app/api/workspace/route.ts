@@ -91,6 +91,7 @@ async function calculateScore(organizationId:string, lead:Record<string,unknown>
 
 function isAdmin(profile:UserProfile){return profile.role==='owner'||profile.role==='admin'}
 async function requireAdmin(profile:UserProfile){if(!isAdmin(profile))throw new Error('Apenas administradores podem realizar esta ação.');}
+function normalizeObservations(value:unknown){return String(value||'').replace(/<\s*br\s*\/?>/gi,'\n').replace(/<\/?(?:p|div)[^>]*>/gi,'\n').replace(/&nbsp;/gi,' ').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>').replace(/\r\n?/g,'\n').replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();}
 
 function scheduledDate(dayOffset: number, time: string, workDays: number[]) {
   const date = new Date();
@@ -238,13 +239,13 @@ export async function POST(request: NextRequest) {
       if(!rows[0])return NextResponse.json({error:"Atividade não encontrada"},{status:404});await sql`insert into lead_events (lead_id,actor_id,event_type,title,body) values (${rows[0].lead_id},${user.id},'rescheduled','Atividade reagendada',${String(body.dueAt)})`;return NextResponse.json({data:rows[0]});
     }
     if(body.action==="updateLead"){
-      const l=body.lead,email=String(l.email||"").trim().toLowerCase();if(!/^\S+@\S+\.\S+$/.test(email))throw new Error("Informe um e-mail válido.");const duplicate=await sql`select id from leads where organization_id=${organizationId} and lower(trim(email))=${email} and id<>${String(l.id)} limit 1`;if(duplicate[0])throw new Error("Já existe outro lead com este e-mail na conta.");await assertNotBlocked(organizationId,email,String(l.phone||""));const score=await calculateScore(organizationId,{...l,email});const rows=await sql`update leads set first_name=${String(l.first_name)},last_name=${String(l.last_name||"")},email=${email},phone=${String(l.phone||"")},company=${String(l.company)},job_title=${String(l.job_title||"")},score=${score},source=${String(l.source||"")},custom_data=${JSON.stringify(l.custom_data||{})},observations=${String(l.observations||"")},updated_at=now() where id=${String(l.id)} and organization_id=${organizationId} returning id`;
+      const l=body.lead,email=String(l.email||"").trim().toLowerCase();if(!/^\S+@\S+\.\S+$/.test(email))throw new Error("Informe um e-mail válido.");const duplicate=await sql`select id from leads where organization_id=${organizationId} and lower(trim(email))=${email} and id<>${String(l.id)} limit 1`;if(duplicate[0])throw new Error("Já existe outro lead com este e-mail na conta.");await assertNotBlocked(organizationId,email,String(l.phone||""));const score=await calculateScore(organizationId,{...l,email});const rows=await sql`update leads set first_name=${String(l.first_name)},last_name=${String(l.last_name||"")},email=${email},phone=${String(l.phone||"")},company=${String(l.company)},job_title=${String(l.job_title||"")},score=${score},source=${String(l.source||"")},custom_data=${JSON.stringify(l.custom_data||{})},observations=${normalizeObservations(l.observations)},updated_at=now() where id=${String(l.id)} and organization_id=${organizationId} returning id`;
       if(!rows[0])return NextResponse.json({error:"Lead não encontrado"},{status:404});return NextResponse.json({ok:true});
     }
     if(body.action==="updateLeadObservations"){
-      const rows=await sql`update leads set observations=${String(body.observations||"")},updated_at=now() where id=${String(body.id)} and organization_id=${organizationId} returning id`;
+      const observations=normalizeObservations(body.observations);const rows=await sql`update leads set observations=${observations},updated_at=now() where id=${String(body.id)} and organization_id=${organizationId} returning id`;
       if(!rows[0])return NextResponse.json({error:"Lead não encontrado"},{status:404});
-      await sql`insert into lead_events (lead_id,actor_id,event_type,title,body) values (${String(body.id)},${user.id},'observations_updated','Observações atualizadas',${String(body.observations||"")})`;
+      await sql`insert into lead_events (lead_id,actor_id,event_type,title,body) values (${String(body.id)},${user.id},'observations_updated','Observações atualizadas',${observations})`;
       return NextResponse.json({ok:true});
     }
     if(body.action==="changeLeadOwner"){
