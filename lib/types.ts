@@ -28,12 +28,15 @@ export interface Lead {
 export interface Activity {
   id: string;
   lead_id: string;
+  lead_cadence_id?: string | null;
+  journey_number?: number | null;
   assigned_to?: string | null;
   type: ActivityType;
   title: string;
   status: ActivityStatus;
   due_at: string;
   completed_at: string | null;
+  created_at?: string | null;
   updated_at?: string | null;
   notes: string | null;
   email_subject?: string | null;

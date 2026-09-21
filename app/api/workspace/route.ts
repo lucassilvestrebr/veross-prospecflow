@@ -111,12 +111,14 @@ async function attachCadence(organizationId: string, userId: string, leadId: str
   ]);
   if (!steps.length) throw new Error("A cadência selecionada não possui etapas.");
   await sql`update lead_cadences set status = 'stopped' where lead_id = ${leadId} and status in ('active','paused')`;
-  await sql`insert into lead_cadences (lead_id, cadence_id, status, current_step, started_at) values (${leadId}, ${cadenceId}, 'active', 1, now())
-    on conflict (lead_id, cadence_id) do update set status='active', current_step=1, started_at=now()`;
+  const latestJourney = await sql`select coalesce(max(journey_number),0)::int as journey_number from lead_cadences where lead_id=${leadId}`;
+  const journeyNumber = Number(latestJourney[0]?.journey_number || 0) + 1;
+  const journey = await sql`insert into lead_cadences (lead_id, cadence_id, journey_number, status, current_step, started_at)
+    values (${leadId}, ${cadenceId}, ${journeyNumber}, 'active', 1, now()) returning id`;
   const days = (settings[0]?.work_days as number[] | undefined) || [1,2,3,4,5];
   for (const step of steps) {
-    await sql`insert into activities (lead_id, cadence_step_id, activity_template_id, assigned_to, type, title, status, due_at, notes, email_subject, email_body)
-      values (${leadId}, ${step.id}, ${step.template_id||null}, ${userId}, ${String(step.type)}, ${String(step.title)}, 'pending', ${scheduledDate(Number(step.day_offset), String(step.suggested_time), days)}, ${String(step.instructions || "")}, ${step.email_subject||null}, ${step.email_body||null})`;
+    await sql`insert into activities (lead_id, lead_cadence_id, cadence_step_id, activity_template_id, assigned_to, type, title, status, due_at, notes, email_subject, email_body)
+      values (${leadId}, ${journey[0].id}, ${step.id}, ${step.template_id||null}, ${userId}, ${String(step.type)}, ${String(step.title)}, 'pending', ${scheduledDate(Number(step.day_offset), String(step.suggested_time), days)}, ${String(step.instructions || "")}, ${step.email_subject||null}, ${step.email_body||null})`;
   }
   await sql`update leads set status='prospecting', updated_at=now() where id=${leadId}`;
   await sql`insert into lead_events (lead_id, actor_id, event_type, title, body) values (${leadId}, ${userId}, 'cadence_started', 'Cadência iniciada', 'As atividades da cadência foram geradas.')`;
@@ -142,7 +144,7 @@ async function workspace(organizationId: string, userId?:string) {
       lc.cadence_id,c.name as cadence_name,lc.status as cadence_status
       from leads l left join lateral (select * from lead_cadences x where x.lead_id=l.id order by x.started_at desc limit 1) lc on true
       left join cadences c on c.id=lc.cadence_id where l.organization_id=${organizationId} order by (l.status='archived'),l.score desc,l.created_at desc`,
-    sql`select a.id,a.lead_id,a.assigned_to,a.type,a.title,a.status,a.due_at,a.completed_at,a.updated_at,a.notes,a.email_subject,a.email_body,s.step_order as cadence_step_order from activities a join leads l on l.id=a.lead_id left join cadence_steps s on s.id=a.cadence_step_id where l.organization_id=${organizationId} order by a.due_at`,
+    sql`select a.id,a.lead_id,a.lead_cadence_id,a.assigned_to,a.type,a.title,a.status,a.due_at,a.completed_at,a.created_at,a.updated_at,a.notes,a.email_subject,a.email_body,s.step_order as cadence_step_order,lc.journey_number from activities a join leads l on l.id=a.lead_id left join cadence_steps s on s.id=a.cadence_step_id left join lead_cadences lc on lc.id=a.lead_cadence_id where l.organization_id=${organizationId} order by a.due_at`,
     sql`select c.id,c.name,c.description,c.active,c.focus,c.priority,c.automatic_loss_days,c.automatic_loss_reason_id,
       (select count(*)::int from lead_cadences lc where lc.cadence_id=c.id) as total_leads,
       (select count(*)::int from lead_cadences lc join leads l on l.id=lc.lead_id where lc.cadence_id=c.id and l.status='new') as awaiting_start,
@@ -269,6 +271,21 @@ export async function POST(request: NextRequest) {
     if(body.action==="setLeadStatus"){
       const status=String(body.status);const rows=await sql`update leads set status=${status},loss_reason_id=${body.lossReasonId?String(body.lossReasonId):null},won_at=${status==="won"?new Date().toISOString():null},lost_at=${status==="lost"?new Date().toISOString():null},archived_at=${status==="archived"?new Date().toISOString():null},updated_at=now() where id=${String(body.id)} and organization_id=${organizationId} returning id`;
       if(!rows[0])return NextResponse.json({error:"Lead não encontrado"},{status:404});if(status==="won"||status==="lost"){const current=body.activityId?await sql`select id,title from activities where id=${String(body.activityId)} and lead_id=${String(body.id)} and status='pending' limit 1`:await sql`select id,title from activities where lead_id=${String(body.id)} and status='pending' order by due_at limit 1`;if(current[0]){await sql`update activities set status='completed',completed_at=now(),updated_at=now() where id=${current[0].id}`;await sql`insert into lead_events (lead_id,actor_id,event_type,title,body) values (${String(body.id)},${user.id},'completed',${status==="won"?'Atividade concluída com ganho':'Atividade concluída com perda'},${String(current[0].title)})`;}await sql`update activities set status='cancelled',updated_at=now() where lead_id=${String(body.id)} and status='pending'`;}if(["qualified","won","lost","archived"].includes(status))await sql`update lead_cadences set status='stopped' where lead_id=${String(body.id)} and status in ('active','paused')`;if(status==="won")await sql`insert into feedback_requests (organization_id,lead_id,created_by) values (${organizationId},${String(body.id)},${user.id}) on conflict (lead_id) do nothing`;await sql`insert into lead_events (lead_id,actor_id,event_type,title,body) values (${String(body.id)},${user.id},'status_changed','Status alterado',${status})`;return NextResponse.json({ok:true});
+    }
+    if(body.action==="reopenLead"){
+      const leadId=String(body.id||"");const found=await sql`select id,created_by,status from leads where id=${leadId} and organization_id=${organizationId} limit 1`;
+      if(!found[0])return NextResponse.json({error:"Lead não encontrado"},{status:404});
+      if(!["won","lost"].includes(String(found[0].status)))throw new Error("Somente leads ganhos ou perdidos podem ser reabertos.");
+      const canReassign=await hasPermission(profile,"reassign_leads");
+      if(!canReassign&&String(found[0].created_by||"")!==user.id)return NextResponse.json({error:"Você só pode reabrir leads sob sua responsabilidade."},{status:403});
+      const assignedTo=canReassign&&body.assignedTo?String(body.assignedTo):user.id;
+      const assignee=await sql`select user_id from profiles where user_id=${assignedTo} and organization_id=${organizationId} and status='active' limit 1`;
+      if(!assignee[0])throw new Error("Selecione um responsável ativo do time.");
+      const cadenceId=String(body.cadenceId||"");if(!cadenceId)throw new Error("Selecione uma cadência para a nova jornada.");
+      await sql`update leads set created_by=${assignedTo},status='new',won_at=null,lost_at=null,loss_reason_id=null,updated_at=now() where id=${leadId} and organization_id=${organizationId}`;
+      await attachCadence(organizationId,assignedTo,leadId,cadenceId);
+      await sql`insert into lead_events (lead_id,actor_id,event_type,title,body) values (${leadId},${user.id},'lead_reopened','Lead reaberto','Uma nova jornada de prospecção foi iniciada.')`;
+      return NextResponse.json({ok:true});
     }
     if(body.action==="changeCadence"){
       await sql`update activities set status='cancelled',updated_at=now() where lead_id=${String(body.leadId)} and cadence_step_id is not null and status='pending'`;
