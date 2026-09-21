@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Veross</title>
+  <rect width="256" height="256" rx="48" fill="#ffffff"/>
+  <g fill="#060923">
+    <path d="M47 69h38l26 76-19 58L47 69Z"/>
+    <path d="M96 69h38l26 76-19 58L96 69Z"/>
+    <path d="M145 69h38l26 76-19 58L145 69Z"/>
+    <path d="M92 187h72l-36 47-36-47Z"/>
+  </g>
+</svg>
